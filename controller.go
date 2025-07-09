@@ -4,14 +4,15 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"k8s.io/apimachinery/pkg/util/duration"
 	"sort"
+	"strings"
 	"time"
 
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	coreinformers "k8s.io/client-go/informers/core/v1"
 
-	"k8s.io/apimachinery/pkg/util/duration"
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/informers"
@@ -23,19 +24,21 @@ import (
 )
 
 const (
-	SlackChannelKey = "alert-slack-channel"
+	SlackChannelKey   = "drcloud.io/alert-slack-channel"
+	FeishuRobotKey    = "drcloud.io/alert-feishu-robot"
+	ServiceCreatorKey = "drcloud.io/creator"
 )
 
 type Controller struct {
 	clientset       kubernetes.Interface
-	slack           Slack
+	notify          NotifyOption
 	informerFactory informers.SharedInformerFactory
 	podInformer     coreinformers.PodInformer
 	queue           workqueue.RateLimitingInterface
 }
 
 // NewController creates a new Controller.
-func NewController(clientset kubernetes.Interface, slack Slack) *Controller {
+func NewController(clientset kubernetes.Interface, notify NotifyOption) *Controller {
 	const resyncPeriod = 0
 	ignoreRestartCount := getIgnoreRestartCount()
 
@@ -85,7 +88,7 @@ func NewController(clientset kubernetes.Interface, slack Slack) *Controller {
 		informerFactory: informerFactory,
 		podInformer:     podInformer,
 		queue:           queue,
-		slack:           slack,
+		notify:          notify,
 	}
 }
 
@@ -205,10 +208,20 @@ func (c *Controller) handlePod(pod *v1.Pod) error {
 	podKey := pod.Namespace + "/" + pod.Name
 
 	currentTime := time.Now().Local()
-	if lastSentTime, ok := c.slack.History[podKey]; ok {
-		if int(currentTime.Sub(lastSentTime).Seconds()) < c.slack.MuteSeconds {
-			klog.Infof("Skip: %s, already sent %s ago.\n", podKey, duration.HumanDuration(time.Since(lastSentTime)))
-			return nil
+	switch c.notify.notify {
+	case "feishu":
+		if lastSentTime, ok := c.notify.feishu.History[podKey]; ok {
+			if int(currentTime.Sub(lastSentTime).Seconds()) < c.notify.feishu.MuteSeconds {
+				klog.Infof("Skip: %s, already sent %s ago.\n", podKey, duration.HumanDuration(time.Since(lastSentTime)))
+				return nil
+			}
+		}
+	case "slack":
+		if lastSentTime, ok := c.notify.slack.History[podKey]; ok {
+			if int(currentTime.Sub(lastSentTime).Seconds()) < c.notify.slack.MuteSeconds {
+				klog.Infof("Skip: %s, already sent %s ago.\n", podKey, duration.HumanDuration(time.Since(lastSentTime)))
+				return nil
+			}
 		}
 	}
 
@@ -274,20 +287,40 @@ func (c *Controller) handlePod(pod *v1.Pod) error {
 			containerLogs = fmt.Sprintf("• Pod Logs Before Restart\n```\n%s```\n", containerLogs)
 		}
 
-		msg := SlackMessage{
-			Title:  fmt.Sprintf("*Pod restarted!*\n*cluster: `%s`, pod: `%s`, namespace: `%s`*", c.slack.ClusterName, pod.Name, pod.Namespace),
-			Text:   podStatus + podEvents + nodeEvents + containerLogs,
-			Footer: fmt.Sprintf("%s, %s, %s", c.slack.ClusterName, pod.Name, pod.Namespace),
-		}
-		// klog.Infoln(msg.Title + "\n" + msg.Text + "\n" + msg.Footer)
-		slackChannel := getSlackChannelFromPod(pod)
-		err = c.slack.sendToChannel(msg, slackChannel)
-		if err != nil {
-			return err
+		switch c.notify.notify {
+		case "feishu":
+			msg := FeishuMessage{
+				Title:   jsonDumps(fmt.Sprintf("*Pod restarted!*\n*cluster: `%s`, pod: `%s`, namespace: `%s`*", c.notify.feishu.ClusterName, pod.Name, pod.Namespace)),
+				Text:    jsonDumps(fmt.Sprintf("%s  %s  %s  %s", podStatus, strings.Trim(string(podEvents), `"`), strings.Trim(string(nodeEvents), `"`), strings.Trim(string(containerLogs), `"`))),
+				Address: strings.Trim(string(fmt.Sprintf("%s/tkestack/cluster/sub/list/pods/pods?rid=1&clusterId=%s&np=%s", c.notify.feishu.DrcloudPlatform, c.notify.feishu.ClusterID, pod.Namespace)), `"`),
+			}
+			//klog.Infoln(msg.Title + "\n" + msg.Text + "\n" + msg.Footer)
+			feishuRobot := getfeishuRobotFromPod(pod)
+			serviceCreator := getServiceCreatorFromPod(pod)
+			err = c.notify.feishu.sendToRobot(msg, feishuRobot, serviceCreator)
+			if err != nil {
+				return err
+			}
+
+			c.notify.feishu.History[podKey] = currentTime
+			c.cleanOldfeishuHistory()
+		case "slack":
+			msg := SlackMessage{
+				Title:  fmt.Sprintf("*Pod restarted!*\n*cluster: `%s`, pod: `%s`, namespace: `%s`*", c.notify.slack.ClusterName, pod.Name, pod.Namespace),
+				Text:   podStatus + podEvents + nodeEvents + containerLogs,
+				Footer: fmt.Sprintf("%s, %s, %s", c.notify.slack.ClusterName, pod.Name, pod.Namespace),
+			}
+			// klog.Infoln(msg.Title + "\n" + msg.Text + "\n" + msg.Footer)
+			slackChannel := getSlackChannelFromPod(pod)
+			err = c.notify.slack.sendToChannel(msg, slackChannel)
+			if err != nil {
+				return err
+			}
+
+			c.notify.slack.History[podKey] = currentTime
+			c.cleanOldSlackHistory()
 		}
 
-		c.slack.History[podKey] = currentTime
-		c.cleanOldSlackHistory()
 		break
 	}
 	return nil
@@ -351,6 +384,7 @@ func (c *Controller) getContainerLogs(pod *v1.Pod, containerStatus v1.ContainerS
 		Previous:   true,
 		Timestamps: true,
 		TailLines:  pointer.Int64Ptr(50),
+		Follow:     true,
 	}
 	rc, err := c.clientset.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, logOptions).Stream(context.TODO())
 	if err != nil {
@@ -368,9 +402,19 @@ func (c *Controller) getContainerLogs(pod *v1.Pod, containerStatus v1.ContainerS
 // cleanOldSlackHistory deletes old pod name from the c.slack.History.
 func (c *Controller) cleanOldSlackHistory() {
 	currentTime := time.Now().Local()
-	for pod, lastSentTime := range c.slack.History {
+	for pod, lastSentTime := range c.notify.slack.History {
 		if currentTime.Sub(lastSentTime).Hours() > 1 {
-			delete(c.slack.History, pod)
+			delete(c.notify.slack.History, pod)
+		}
+	}
+}
+
+// cleanOldfeishuHistory deletes old pod name from the c.feishu.History.
+func (c *Controller) cleanOldfeishuHistory() {
+	currentTime := time.Now().Local()
+	for pod, lastSentTime := range c.notify.feishu.History {
+		if currentTime.Sub(lastSentTime).Hours() > 1 {
+			delete(c.notify.feishu.History, pod)
 		}
 	}
 }
@@ -382,6 +426,28 @@ func getSlackChannelFromPod(pod *v1.Pod) string {
 	}
 	if slackChannel, ok := pod.GetLabels()[SlackChannelKey]; ok {
 		return slackChannel
+	}
+	return ""
+}
+
+// getfeishuRobotFromPod gets custom feishu robot from pod annotations or labels.
+func getfeishuRobotFromPod(pod *v1.Pod) string {
+	if feishuRobot, ok := pod.GetAnnotations()[FeishuRobotKey]; ok {
+		return feishuRobot
+	}
+	if feishuRobot, ok := pod.GetLabels()[FeishuRobotKey]; ok {
+		return feishuRobot
+	}
+	return ""
+}
+
+// getCreatorFromPod gets custom feishu robot from pod annotations or labels.
+func getServiceCreatorFromPod(pod *v1.Pod) string {
+	if creator, ok := pod.GetAnnotations()[ServiceCreatorKey]; ok {
+		return creator
+	}
+	if creator, ok := pod.GetLabels()[ServiceCreatorKey]; ok {
+		return creator
 	}
 	return ""
 }
