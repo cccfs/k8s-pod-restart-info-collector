@@ -13,6 +13,12 @@ import (
 	"k8s.io/klog/v2"
 )
 
+type NotifyOption struct {
+	feishu Feishu
+	slack Slack
+	notify string
+}
+
 func main() {
 	var kubeconfig *string
 	if home := homedir.HomeDir(); home != "" {
@@ -38,8 +44,23 @@ func main() {
 		klog.Fatal(err)
 	}
 
-	slack := NewSlack()
-	controller := NewController(clientset, slack)
+		
+	var notifyChannel string
+	flag.StringVar(&notifyChannel, "notify-channel", "feishu", "(optional) feishu,slack")
+	no := &NotifyOption{}
+	switch notifyChannel {
+	case "feishu": 
+		no.feishu = NewFeishu()
+		no.notify = "feishu"
+	case "slack":
+		no.slack = NewSlack()
+		no.notify = "slack"
+	default:
+		no.feishu = NewFeishu()
+		no.notify = "feishu"
+	}
+	
+	controller := NewController(clientset, *no)
 
 	// Start the controller
 	stop := make(chan struct{})

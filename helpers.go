@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -18,6 +19,14 @@ import (
 	"k8s.io/klog/v2"
 	"k8s.io/kubectl/pkg/describe"
 )
+
+func jsonDumps(data string) string {
+	jsonBytes, err := json.Marshal(data)
+	if err != nil {
+		return ""
+	}
+	return strings.Trim(string(jsonBytes), `"`)
+}
 
 func getPodRestartCount(pod *v1.Pod) int {
 	var restarts int = 0
