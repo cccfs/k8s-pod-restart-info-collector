@@ -290,9 +290,10 @@ func (c *Controller) handlePod(pod *v1.Pod) error {
 		switch c.notify.notify {
 		case "feishu":
 			msg := FeishuMessage{
-				Title:   jsonDumps(fmt.Sprintf("*Pod restarted!*\n*cluster: `%s`, pod: `%s`, namespace: `%s`*", c.notify.feishu.ClusterName, pod.Name, pod.Namespace)),
-				Text:    jsonDumps(fmt.Sprintf("%s  %s  %s  %s", podStatus, strings.Trim(string(podEvents), `"`), strings.Trim(string(nodeEvents), `"`), strings.Trim(string(containerLogs), `"`))),
-				Address: strings.Trim(string(fmt.Sprintf("%s/tkestack/cluster/sub/list/pods/pods?rid=1&clusterId=%s&np=%s", c.notify.feishu.DrcloudPlatform, c.notify.feishu.ClusterID, pod.Namespace)), `"`),
+				Title: jsonDumps(fmt.Sprintf("*Pod restarted!*\n*cluster: `%s`, pod: `%s`, namespace: `%s`*", c.notify.feishu.ClusterName, pod.Name, pod.Namespace)),
+				Text:  jsonDumps(fmt.Sprintf("%s  %s  %s  %s", podStatus, strings.Trim(string(podEvents), `"`), strings.Trim(string(nodeEvents), `"`), strings.Trim(string(containerLogs), `"`))),
+				//Address: strings.Trim(string(fmt.Sprintf("%s/tkestack/cluster/sub/list/pods/pods?rid=1&clusterId=%s&np=%s", c.notify.feishu.DrcloudPlatform, c.notify.feishu.ClusterID, pod.Namespace)), `"`),
+				Address: strings.Trim(string(fmt.Sprintf("%s/tkestack/cluster/sub/detail/pods/pods/monitor?rid=1&clusterId=%s&np=%s&resourceIns=%s", c.notify.feishu.DrcloudPlatform, c.notify.feishu.ClusterID, pod.Namespace, pod.Name)), `"`),
 			}
 			//klog.Infoln(msg.Title + "\n" + msg.Text + "\n" + msg.Footer)
 			feishuRobot := getfeishuRobotFromPod(pod)
@@ -383,7 +384,7 @@ func (c *Controller) getContainerLogs(pod *v1.Pod, containerStatus v1.ContainerS
 		Container:  containerStatus.Name,
 		Previous:   true,
 		Timestamps: true,
-		TailLines:  pointer.Int64Ptr(50),
+		TailLines:  pointer.Int64Ptr(250),
 		Follow:     true,
 	}
 	rc, err := c.clientset.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, logOptions).Stream(context.TODO())
