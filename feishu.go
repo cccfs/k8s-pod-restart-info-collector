@@ -185,7 +185,7 @@ func (f Feishu) sendToRobot(msg FeishuMessage, feishuRobot, serviceCreator strin
 								"tag": "button",
 								"text": {
 									"tag": "plain_text",
-									"content": "查看项目"
+									"content": "查看Pod监控"
 								},
 								"type": "primary_text",
 								"width": "default",
